@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-# from app.routes import llm
+from app.routes import llm
 
 app=FastAPI()
 
@@ -24,5 +24,5 @@ def health_check():
         "message":"ok"
     }
 
-# app.include_router(llm.router)
+app.include_router(llm.router)
 
