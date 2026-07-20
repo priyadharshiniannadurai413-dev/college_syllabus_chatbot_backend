@@ -1,0 +1,8 @@
+fastapi
+litellm==1.91.3
+python-dotenv
+uvicorn
+pypdf
+pdfplumber
+sentence-transformers
+chromadb
