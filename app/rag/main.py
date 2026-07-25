@@ -42,7 +42,7 @@ async def main():
 
     embedding_model = EmbeddingModel()
 
-    embeddings = embedding_model.generate_embeddings(chunks)
+    embeddings = await embedding_model.embed_texts(chunks)
 
     print(f"[SUCCESS] Generated {len(embeddings)} embeddings")
 

@@ -207,7 +207,7 @@ class VectorStore:
         Generates query embedding and returns matches in ChromaDB-compatible dictionary format.
         """
         embedding_model = EmbeddingModel()
-        query_embedding = embedding_model.generate_embeddings([search_query])[0]
+        query_embedding = await embedding_model.embed_query(search_query)
 
         matches = await self.query(query_embedding, top_k=top_k)
 
