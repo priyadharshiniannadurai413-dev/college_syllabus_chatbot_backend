@@ -3,8 +3,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.routes import llm
-from app.api.voice import router as voice_router
+# from app.api.voice import router as voice_router
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
+import os
+
+# Ensure outputs directory exists for StaticFiles mounting
+os.makedirs("outputs", exist_ok=True)
 
 
 @asynccontextmanager
@@ -37,11 +41,8 @@ def health_check():
     }
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 app.include_router(llm.router)
-app.include_router(voice_router)
+# app.include_router(voice_router)
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
 
 
