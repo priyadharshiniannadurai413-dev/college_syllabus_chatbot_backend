@@ -6,3 +6,8 @@ pypdf
 pdfplumber
 sentence-transformers
 chromadb
+edge-tts
+python-multipart
+
+pymongo
+motor

@@ -1,9 +1,18 @@
+import sys
+from pathlib import Path
+
+# Add project root directory to sys.path to support running as script directly
+root_dir = Path(__file__).resolve().parents[2]
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
+
 from app.rag.vector_store import VectorStore
 from app.rag.prompt import build_prompt
 from app.rag.query_normalizer import normalize_query
 
 
-def get_rag_prompt(question):
+
+async def get_rag_prompt(question, is_voice=False):
 
     # Step 1: Normalize query — extract intent + metadata filter + canonical search query
     normalized = normalize_query(question)
@@ -17,7 +26,7 @@ def get_rag_prompt(question):
 
     # Step 2: Retrieve relevant chunks using normalized query + optional where filter
     vector_store = VectorStore()
-    results = vector_store.retrieve(search_query, where=where_filter)
+    results = await vector_store.retrieve(search_query, where=where_filter)
 
     documents = results["documents"][0]
 
@@ -32,9 +41,15 @@ def get_rag_prompt(question):
     print(context[:800])
 
     # Step 3: Build an intent-aware prompt
-    prompt = build_prompt(context, question, intent=intent, semester=normalized["semester"])
+    prompt = build_prompt(
+    context,
+    question,
+    intent=intent,
+    semester=normalized["semester"],
+    is_voice=is_voice
+)
 
     print("\n========== FINAL PROMPT ==========")
     print(prompt)
 
-    return prompt
+    return prompt

@@ -6,15 +6,19 @@ root_dir = Path(__file__).resolve().parents[2]
 if str(root_dir) not in sys.path:
     sys.path.append(str(root_dir))
 
+import asyncio
+from app.db.mongodb import connect_to_mongo
 from app.rag.loader import extract_pdf
 from app.rag.chunking import chunk_by_sections
 from app.rag.embedding import EmbeddingModel
 from app.rag.vector_store import VectorStore
 
 
-def main():
+async def main():
 
     pdf_path = r"uploads\my_college_syllabus.pdf"
+
+    await connect_to_mongo()
 
     # Step 1
     print("Step 1: Extracting PDF...")
@@ -43,13 +47,13 @@ def main():
     print(f"[SUCCESS] Generated {len(embeddings)} embeddings")
 
     # Step 4
-    print("\nStep 4: Storing in ChromaDB...")
+    print("\nStep 4: Storing in MongoDB Atlas...")
 
     vector_store = VectorStore()
 
-    vector_store.add(
-        chunks,
-        embeddings,
+    await vector_store.add(
+        documents=chunks,
+        embeddings=embeddings,
         source="my_college_syllabus"
     )
 
@@ -57,4 +61,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
