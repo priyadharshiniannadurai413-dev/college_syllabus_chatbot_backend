@@ -6,7 +6,6 @@ uvicorn
 pypdf
 pdfplumber
 
-
-
 pymongo
 motor
+
