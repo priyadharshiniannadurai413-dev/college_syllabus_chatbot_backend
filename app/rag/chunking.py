@@ -110,4 +110,4 @@ def chunk_by_sections(text):
     if current_chunk:
         chunks.append("\n".join(current_chunk))
 
-    return chunks
+    return chunks

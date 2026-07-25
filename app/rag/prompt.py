@@ -1,4 +1,21 @@
-def build_prompt(context: str, question: str, intent: str = "general", semester: str = None) -> str:
+def build_prompt(
+    context: str,
+    question: str,
+    intent: str = "general",
+    semester: str = None,
+    is_voice: bool = False,
+) -> str:
+    voice_instruction = ""
+
+    if is_voice:
+        voice_instruction = """
+VOICE RESPONSE RULES:
+- Answer in simple language.
+- Keep the answer within 2–3 short sentences.
+- Do not use markdown.
+- Do not use tables.
+- Read naturally as if speaking.
+"""
     """
     Build an intent-aware RAG prompt for the syllabus chatbot.
 
@@ -17,6 +34,7 @@ CONTEXT (retrieved from syllabus):
 {context}
 
 TASK:
+{voice_instruction}
 The student is asking about the courses offered in {sem_label}.
 
 Using ONLY the context above, list all courses for {sem_label} in this exact format:
@@ -41,6 +59,7 @@ CONTEXT (retrieved from syllabus):
 {context}
 
 TASK:
+{voice_instruction}
 The student is asking about credit information.
 
 Using ONLY the context above, provide a clear summary of credits. If a credits summary table is available, present it formatted as a markdown table. Show per-semester totals and category-wise breakdown where available.
@@ -52,6 +71,31 @@ QUESTION: {question}
 
 ANSWER:"""
 
+    elif intent == "unit":
+        return f"""You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
+
+CONTEXT (retrieved from syllabus):
+{context}
+
+TASK:
+{voice_instruction}
+
+The student is asking only about a specific unit.
+
+Using ONLY the context above:
+
+- Return ONLY the requested unit.
+- Do NOT include course objectives.
+- Do NOT include course outcomes.
+- Do NOT include other units.
+- Keep the answer concise.
+- If the requested unit is not found, say: "{no_info_msg}"
+
+QUESTION:
+{question}
+
+ANSWER:"""
+
     elif intent == "course_detail":
         return f"""You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
 
@@ -59,20 +103,24 @@ CONTEXT (retrieved from syllabus):
 {context}
 
 TASK:
+{voice_instruction}
+
 The student wants detailed information about a specific course or topic.
 
 Using ONLY the context above, provide a structured answer with:
-1. **Course Code & Title** (if applicable)
-2. **Course Objectives** — list each objective
-3. **Unit-wise Topics** — list units with their topics
-4. **Course Outcomes** (if available)
+1. Course Code & Title (if applicable)
+2. Course Objectives
+3. Unit-wise Topics
+4. Course Outcomes (if available)
 
-- Be concise but complete. Do not skip objectives or units.
+- Be concise but complete.
 - If the requested course is not in the context, say: "{no_info_msg}"
 
-QUESTION: {question}
+QUESTION:
+{question}
 
 ANSWER:"""
+        
 
     else:  # general
         return f"""You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
@@ -81,6 +129,7 @@ CONTEXT (retrieved from syllabus):
 {context}
 
 TASK:
+{voice_instruction}
 Answer the student's question using ONLY the information provided in the context above.
 
 Rules:
@@ -91,4 +140,4 @@ Rules:
 
 QUESTION: {question}
 
-ANSWER:"""
+ANSWER:"""

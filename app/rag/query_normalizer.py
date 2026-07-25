@@ -46,6 +46,20 @@ _INTENT_CREDIT_INFO = re.compile(
     r"\b(credits?|total\s+credits?|how many credits?)\b",
     re.IGNORECASE,
 )
+_INTENT_UNIT = re.compile(
+    r"\b(unit\s*[1-6]|module\s*[1-6])\b",
+    re.IGNORECASE,
+)
+
+_INTENT_OBJECTIVES = re.compile(
+    r"\b(objectives?)\b",
+    re.IGNORECASE,
+)
+
+_INTENT_OUTCOMES = re.compile(
+    r"\b(outcomes?)\b",
+    re.IGNORECASE,
+)
 _INTENT_COURSE_DETAIL = re.compile(
     r"\b(syllabus|units?|objectives?|outcomes?|explain|detail|topics?|content)\b",
     re.IGNORECASE,
@@ -69,12 +83,23 @@ def _extract_semester_roman(text: str):
 def detect_intent(question: str) -> str:
     if _INTENT_CREDIT_INFO.search(question):
         return "credit_info"
+
     if _INTENT_LIST_COURSES.search(question):
         return "list_courses"
+
+    if _INTENT_UNIT.search(question):
+        return "unit"
+
+    if _INTENT_OBJECTIVES.search(question):
+        return "objectives"
+
+    if _INTENT_OUTCOMES.search(question):
+        return "outcomes"
+
     if _INTENT_COURSE_DETAIL.search(question):
         return "course_detail"
-    return "general"
 
+    return "general"
 
 def normalize_query(question: str) -> dict:
     semester = _extract_semester_roman(question)

@@ -8,14 +8,17 @@ if str(root_dir) not in sys.path:
 
 from app.rag.rag_pipeline import get_rag_prompt
 from app.ai.chat_service import ChatService
+from app.db.mongodb import connect_to_mongo
 import asyncio
 
 
 async def main():
 
+    await connect_to_mongo()
+
     question = input("Ask a question: ")
 
-    prompt = get_rag_prompt(question)
+    prompt = await get_rag_prompt(question)
 
     print("\nPrompt sent to the LLM:\n")
     print("=" * 100)
