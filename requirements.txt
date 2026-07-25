@@ -1,5 +1,5 @@
 fastapi
-litellm==1.91.3
+litellm==1.82.6
 python-dotenv
 uvicorn
 
