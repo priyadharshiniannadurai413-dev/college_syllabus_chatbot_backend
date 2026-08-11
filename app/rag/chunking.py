@@ -1,5 +1,12 @@
 import re
 
+# ── LangChain imports ──────────────────────────────────────────────────────────
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Section-header constants used by the curriculum-overview parser (Phase 1)
+# ──────────────────────────────────────────────────────────────────────────────
 SECTION_HEADERS = [
     "PROGRAMME SPECIFIC OUTCOMES",
     "PROGRAMME OUTCOMES",
@@ -38,6 +45,9 @@ def _is_semester_header(line: str) -> bool:
     return bool(SEMESTER_HEADER_PATTERN.match(line.strip()))
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Core syllabus chunker — kept exactly as originally authored
+# ──────────────────────────────────────────────────────────────────────────────
 def chunk_by_sections(text):
 
     chunks = []
@@ -111,3 +121,32 @@ def chunk_by_sections(text):
         chunks.append("\n".join(current_chunk))
 
     return chunks
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LangChain integration
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def get_langchain_documents(text: str) -> list[Document]:
+    chunks = chunk_by_sections(text)
+
+    documents = [
+        Document(
+            page_content=chunk,
+            metadata={
+                "source": "syllabus",
+                "section": chunk.splitlines()[0].strip() if chunk.strip() else "",
+                "chunk_index": i,
+            },
+        )
+        for i, chunk in enumerate(chunks)
+        if chunk.strip()
+    ]
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=100,
+    )
+
+    return splitter.split_documents(documents)
