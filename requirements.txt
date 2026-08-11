@@ -9,3 +9,10 @@ pdfplumber
 pymongo
 motor
 
+langchain
+langchain-core
+langchain-mongodb
+langchain-community
+langchain-tavily
+langchain-groq
+langchain-google-genai
