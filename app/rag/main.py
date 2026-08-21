@@ -10,8 +10,8 @@ import asyncio
 from app.db.mongodb import connect_to_mongo
 from app.rag.loader import extract_pdf
 from app.rag.chunking import chunk_by_sections
-from app.rag.embedding import EmbeddingModel
-from app.rag.vector_store import VectorStore
+from app.rag.embedding import get_embedding_model
+from app.rag.vector_store import get_vector_store
 
 
 async def main():
@@ -40,7 +40,7 @@ async def main():
     # Step 3
     print("\nStep 3: Generating Embeddings...")
 
-    embedding_model = EmbeddingModel()
+    embedding_model = get_embedding_model()
 
     embeddings = await embedding_model.embed_texts(chunks)
 
@@ -49,7 +49,7 @@ async def main():
     # Step 4
     print("\nStep 4: Storing in MongoDB Atlas...")
 
-    vector_store = VectorStore()
+    vector_store = get_vector_store()
 
     await vector_store.add(
         documents=chunks,
@@ -58,6 +58,11 @@ async def main():
     )
 
     print("[SUCCESS] Vectors stored successfully")
+
+    # Step 5: Ensure text index exists for hybrid keyword search
+    print("\nStep 5: Ensuring text index for keyword search...")
+    await vector_store.ensure_text_index()
+    print("[SUCCESS] Text index ready")
 
 
 if __name__ == "__main__":

@@ -29,3 +29,14 @@ class EmbeddingModel:
     def embed_query(self, text: str) -> list[float]:
         """Convert the user's query into an embedding (sync)."""
         return self.embeddings.embed_query(text)
+
+
+_embedding_instance: EmbeddingModel | None = None
+
+
+def get_embedding_model() -> EmbeddingModel:
+    """Return a shared EmbeddingModel singleton."""
+    global _embedding_instance
+    if _embedding_instance is None:
+        _embedding_instance = EmbeddingModel()
+    return _embedding_instance

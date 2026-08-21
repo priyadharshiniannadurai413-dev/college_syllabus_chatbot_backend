@@ -5,11 +5,18 @@ import logging
 from pymongo import MongoClient, UpdateOne
 from pymongo.operations import SearchIndexModel
 from app.db.mongodb import get_vector_collection
-from app.rag.embedding import EmbeddingModel
+from app.rag.embedding import get_embedding_model
 from app.core.config import settings
 
 from langchain_core.documents import Document
 from langchain_mongodb import MongoDBAtlasVectorSearch
+
+from app.rag.config import (
+    HYBRID_VECTOR_TOP_K,
+    HYBRID_KEYWORD_TOP_K,
+    HYBRID_FINAL_TOP_K,
+    HYBRID_RRF_K,
+)
 
 logger = logging.getLogger("uvicorn")
 
@@ -17,6 +24,39 @@ _SEM_HEADER_RE = re.compile(r"SEMESTER\s*-\s*([IVXLCDM]+)", re.IGNORECASE)
 _SEM_DETAIL_RE = re.compile(r"^SEMESTER\s+([IVXLCDM]+)$", re.IGNORECASE)
 _COURSE_CODE_RE = re.compile(r"^(\d{2}[A-Z]{3,5}\d{3})\b")
 _ROMAN_VALID = {"I", "II", "III", "IV", "V", "VI", "VII", "VIII"}
+
+
+def merge_rrf(
+    vector_results: list[tuple[Document, float]],
+    keyword_results: list[tuple[Document, float]],
+    rrf_k: int = HYBRID_RRF_K,
+    final_top_k: int = HYBRID_FINAL_TOP_K,
+) -> list[tuple[Document, float]]:
+    """
+    Reciprocal Rank Fusion — merge two ranked lists into one.
+
+    RRF Score(doc) = SUM( 1 / (k + rank_i) ) for each list where doc appears.
+    Duplicate documents (by content hash) are merged automatically.
+    """
+    doc_scores: dict[str, float] = {}
+    doc_map: dict[str, Document] = {}
+
+    def _doc_id(doc: Document) -> str:
+        """Stable ID for deduplication: prefer _id in metadata, else first 120 chars."""
+        return doc.metadata.get("_id") or doc.page_content[:120]
+
+    for rank, (doc, _score) in enumerate(vector_results):
+        did = _doc_id(doc)
+        doc_scores[did] = doc_scores.get(did, 0.0) + 1.0 / (rrf_k + rank + 1)
+        doc_map[did] = doc
+
+    for rank, (doc, _score) in enumerate(keyword_results):
+        did = _doc_id(doc)
+        doc_scores[did] = doc_scores.get(did, 0.0) + 1.0 / (rrf_k + rank + 1)
+        doc_map[did] = doc
+
+    ranked = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
+    return [(doc_map[did], score) for did, score in ranked[:final_top_k]]
 
 def _parse_chunk_metadata(chunk: str, source: str) -> dict:
     """Extract rich metadata from a chunk's content."""
@@ -55,7 +95,7 @@ class VectorStore:
         
         self._lc_store = MongoDBAtlasVectorSearch(
             collection=sync_collection,
-            embedding=EmbeddingModel(),
+            embedding=get_embedding_model(),
             index_name=self.INDEX_NAME,
             text_key="text",
             embedding_key="embedding",
@@ -88,6 +128,21 @@ class VectorStore:
                 logger.info(f"✅ Automatically created Atlas Vector Search index '{self.INDEX_NAME}' on MongoDB Atlas.")
         except Exception as e:
             logger.debug(f"Atlas Search index check note: {e}")
+
+    async def ensure_text_index(self):
+        """Create a MongoDB text index on the 'text' field for keyword search."""
+        try:
+            existing = await self._collection.index_information()
+            if "text_index" not in existing:
+                await self._collection.create_index(
+                    [("text", "text")],
+                    name="text_index",
+                )
+                logger.info("Text index 'text_index' created on 'text' field.")
+            else:
+                logger.debug("Text index 'text_index' already exists.")
+        except Exception as e:
+            logger.debug(f"Text index note: {e}")
 
     async def add_documents(self, documents: list[Document], source: str = "unknown"):
         if not documents:
@@ -134,17 +189,76 @@ class VectorStore:
             logger.warning(f"MongoDB Vector Search failed or 'vector_index' is not configured yet in Atlas UI: {e}")
             return []
 
+    async def keyword_search(self, query: str, top_k: int = 4) -> list[tuple[Document, float]]:
+        """
+        MongoDB $text search — performs word-level matching with stemming.
+        Requires a text index on the 'text' field (created by ensure_text_index()).
+        """
+        try:
+            cursor = self._collection.find(
+                {"$text": {"$search": query}},
+                {"score": {"$meta": "textScore"}},
+            ).sort(
+                [("score", {"$meta": "textScore"})]
+            ).limit(top_k)
+
+            docs = await cursor.to_list(length=top_k)
+            return [
+                (
+                    Document(
+                        page_content=doc.get("text", ""),
+                        metadata={
+                            **doc.get("metadata", {}),
+                            "_id": str(doc.get("_id", "")),
+                        },
+                    ),
+                    doc.get("score", 0.0),
+                )
+                for doc in docs
+            ]
+        except Exception as e:
+            logger.warning(f"Keyword search failed (text index may not exist): {e}")
+            return []
+
     async def retrieve(self, search_query: str, top_k: int = 4, where: dict = None) -> dict:
-        results = await self.similarity_search(search_query, top_k=top_k)
+        """
+        Hybrid retrieval: runs vector search + keyword search concurrently,
+        merges results with Reciprocal Rank Fusion (RRF), and returns top_k.
+        """
+        vector_results, keyword_results = await asyncio.gather(
+            self.similarity_search(search_query, top_k=HYBRID_VECTOR_TOP_K),
+            self.keyword_search(search_query, top_k=HYBRID_KEYWORD_TOP_K),
+        )
+
+        logger.info(
+            f"[Hybrid] Vector: {len(vector_results)}, Keyword: {len(keyword_results)}"
+        )
+
+        final_k = min(top_k, HYBRID_FINAL_TOP_K)
+        merged = merge_rrf(vector_results, keyword_results, rrf_k=HYBRID_RRF_K, final_top_k=final_k)
+
+        logger.info(f"[Hybrid] Merged: {len(merged)} results")
+
         matches = [{
             "text": doc.page_content,
             "source": doc.metadata.get("source", "unknown"),
             "score": float(score),
             "distance": 1.0 - float(score),
             "metadata": doc.metadata,
-        } for doc, score in results]
+        } for doc, score in merged]
 
         return {
             "documents": [[m["text"] for m in matches]],
             "matches": matches,
         }
+
+
+_vector_store_instance: VectorStore | None = None
+
+
+def get_vector_store() -> VectorStore:
+    """Return a shared VectorStore singleton."""
+    global _vector_store_instance
+    if _vector_store_instance is None:
+        _vector_store_instance = VectorStore()
+    return _vector_store_instance
