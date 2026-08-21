@@ -15,7 +15,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 import litellm
 
-from app.rag.vector_store import VectorStore
+from app.rag.vector_store import get_vector_store
 from app.rag.prompt import build_prompt
 from app.rag.query_normalizer import normalize_query
 
@@ -91,7 +91,7 @@ async def get_rag_response(question: str, is_voice: bool = False) -> str:
     print(f"[RAG] Search Query: {search_query}")
     print(f"[RAG] Metadata Filter: {where_filter}")
 
-    retriever = SyllabusRetriever(vector_store=VectorStore(), where_filter=where_filter, top_k=4)
+    retriever = SyllabusRetriever(vector_store=get_vector_store(), where_filter=where_filter, top_k=4)
     retrieved_docs = await retriever._aget_relevant_documents(search_query)
 
     for i, doc in enumerate(retrieved_docs, start=1):

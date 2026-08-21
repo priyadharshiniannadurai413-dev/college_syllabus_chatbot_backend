@@ -14,7 +14,7 @@ import logging
 from langchain.tools import tool
 
 from app.rag.query_normalizer import normalize_query
-from app.rag.vector_store import VectorStore
+from app.rag.vector_store import get_vector_store
 
 logger = logging.getLogger("uvicorn")
 
@@ -53,7 +53,7 @@ async def _async_retrieve(query: str) -> str:
     search_query = normalized["search_query"]
     where_filter = normalized["where"]
 
-    vector_store = VectorStore()
+    vector_store = get_vector_store()
     results = await vector_store.retrieve(search_query, top_k=4, where=where_filter)
 
     matches = results.get("matches", [])
@@ -73,7 +73,7 @@ async def _async_retrieve(query: str) -> str:
 
 
 @tool
-def syllabus_rag_search(query: str) -> str:
+async def syllabus_rag_search(query: str) -> str:
     """
     Search the college syllabus database for course content, subject lists,
     unit topics, credit information, course objectives, course outcomes,
@@ -95,7 +95,7 @@ def syllabus_rag_search(query: str) -> str:
     Returns:
         Relevant syllabus content retrieved from the vector database.
     """
-    return _run_retrieval(query)
+    return await _async_retrieve(query)
 
 
 async def syllabus_rag_search_async(query: str) -> str:

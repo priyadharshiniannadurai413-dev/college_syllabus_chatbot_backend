@@ -5,8 +5,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from app.routes import llm
+from app.core.config import settings
 # from app.api.voice import router as voice_router
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
+from app.services.mcp_client import mcp_client
 import os
 
 # Ensure outputs directory exists for StaticFiles mounting
@@ -16,7 +18,9 @@ os.makedirs("outputs", exist_ok=True)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_to_mongo()
+    await mcp_client.connect()
     yield
+    await mcp_client.disconnect()
     await close_mongo_connection()
 
 
@@ -39,9 +43,16 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
+_allowed_origins = [
+    "http://localhost:3000",
+]
+_frontend_url = os.getenv("FRONTEND_URL", "")
+if _frontend_url:
+    _allowed_origins.append(_frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,8 +66,11 @@ def landing_page():
 
 @app.get("/health")
 def health_check():
-    return{
-        "message":"ok"
+    from app.services.mcp_client import mcp_client
+    return {
+        "message": "ok",
+        "mcp_connected": mcp_client.is_connected,
+        "mcp_tools_count": len(mcp_client.get_tools()),
     }
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 app.include_router(llm.router)
