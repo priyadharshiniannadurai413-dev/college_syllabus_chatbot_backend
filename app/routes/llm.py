@@ -32,6 +32,7 @@ async def chatbot(request: ChatRequest, current_user: dict = Depends(get_current
     service = ChatService(
         request.user_prompt,
         conversation_history=request.conversation_history,
+        user_id=current_user["sub"],
     )
 
     return StreamingResponse(

@@ -5,10 +5,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from app.routes import llm
+from app.routes import github_auth
 from app.core.config import settings
 # from app.api.voice import router as voice_router
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
-from app.services.mcp_client import mcp_client
 import os
 
 # Ensure outputs directory exists for StaticFiles mounting
@@ -17,10 +17,9 @@ os.makedirs("outputs", exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Note: MCP connections are per-user now — no global GitHub connect here.
     await connect_to_mongo()
-    await mcp_client.connect()
     yield
-    await mcp_client.disconnect()
     await close_mongo_connection()
 
 
@@ -66,14 +65,14 @@ def landing_page():
 
 @app.get("/health")
 def health_check():
-    from app.services.mcp_client import mcp_client
+    from app.services.mcp_client import mcp_manager
     return {
         "message": "ok",
-        "mcp_connected": mcp_client.is_connected,
-        "mcp_tools_count": len(mcp_client.get_tools()),
+        "mcp": mcp_manager.stats(),
     }
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 app.include_router(llm.router)
+app.include_router(github_auth.router)
 # app.include_router(voice_router)
 
 
