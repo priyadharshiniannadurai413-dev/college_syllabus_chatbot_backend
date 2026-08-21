@@ -19,3 +19,4 @@ langchain-google-genai
 langchain-mcp-adapters
 
 python-jose[cryptography]
+cryptography

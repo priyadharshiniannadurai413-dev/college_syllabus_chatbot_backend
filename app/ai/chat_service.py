@@ -22,6 +22,8 @@ Tools registered:
     calculate_cgpa        — CGPA / semester GPA math
     syllabus_rag_search   — Course content, units, credits, objectives
     web_search_tool       — Exam patterns, placements, current live info
+    GitHub MCP tools      — per-user, only when the requesting user has
+                            connected their own GitHub account (OAuth)
 """
 
 import json
@@ -36,9 +38,9 @@ from langchain_mistralai import ChatMistralAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.core.config import settings
-from app.tools import get_all_tools, get_tool_registry, get_mcp_tool_registry
+from app.tools import get_tool_registry
 from app.ai.router import route, route_with_llm, Intent
-from app.services.mcp_client import mcp_client
+from app.services.mcp_client import get_connected_client_for_user, MCPClient
 
 logger = logging.getLogger("uvicorn")
 
@@ -79,60 +81,9 @@ github.com/owner/repo, extract owner and repo directly and skip steps 1-2.
 If the question is a simple greeting or needs no tool, answer directly. Be concise. Use tables/lists for structured data."""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Tool executor — maps tool name → async call
-# Built dynamically at call time so MCP tools are included.
+# Tool executor — per-request tool map (local tools + the requesting user's
+# MCP tools). Built in ChatService.chat() so GitHub calls run as THAT user.
 # ──────────────────────────────────────────────────────────────────────────────
-
-async def _execute_tool(tool_name: str, tool_args: dict) -> str:
-    """
-    Execute a tool by name dynamically using the registered tool map.
-    Utilizes LangChain's native .ainvoke() which safely handles both
-    synchronous and asynchronous tools without blocking the event loop.
-    """
-    global _cached_tool_map
-    logger.info(f"[ChatService] Executing tool '{tool_name}' with args: {tool_args}")
-
-    try:
-        if _cached_tool_map is None:
-            _cached_tool_map = {t.name: t for t in get_all_tools()}
-        tool = _cached_tool_map.get(tool_name)
-        if not tool:
-            logger.warning(f"[ChatService] Unknown tool requested: {tool_name}")
-            return f"Unknown tool: {tool_name}"
-
-        result = await tool.ainvoke(tool_args)
-        return str(result)
-
-    except Exception as exc:
-        logger.error(f"[ChatService] Tool execution failed for '{tool_name}': {exc}", exc_info=True)
-        return f"Tool execution error: {exc}"
-
-
-async def _execute_tool_batch(
-    tool_calls: list[dict],
-) -> List[ToolMessage]:
-    """
-    Execute multiple tool calls concurrently using asyncio.gather().
-    Returns a list of ToolMessages in the same order as the input tool_calls.
-    """
-    async def _run_one(tc: dict) -> ToolMessage:
-        tc_id = tc.get("id", "")
-        tc_name = tc.get("name", "")
-        tc_args = tc.get("args", {})
-
-        if isinstance(tc_args, str):
-            try:
-                tc_args = json.loads(tc_args)
-            except json.JSONDecodeError:
-                tc_args = {}
-
-        tool_output = await _execute_tool(tc_name, tc_args)
-        logger.info(
-            f"[ChatService] Tool '{tc_name}' output (first 200 chars): {tool_output[:200]}"
-        )
-        return ToolMessage(content=tool_output, tool_call_id=tc_id)
-
-    return await asyncio.gather(*[_run_one(tc) for tc in tool_calls])
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -158,10 +109,14 @@ class ChatService:
         user_prompt: str,
         is_voice: bool = False,
         conversation_history: Optional[List[dict]] = None,
+        user_id: Optional[str] = None,
     ):
         self.user_prompt = user_prompt
         self.is_voice = is_voice
         self.conversation_history = conversation_history
+        self.user_id = user_id  # Clerk user id — resolves per-user GitHub MCP tools
+        # Per-request tool map (local tools + this user's MCP tools), built in chat()
+        self.tool_map: dict[str, BaseTool] = {}
 
         # ── Initialize LLMs ───────────────────────────────────────────────────
         self.primary_llm = ChatMistralAI(
@@ -188,6 +143,92 @@ class ChatService:
             max_tokens=200,
             api_key=settings.GEMINI_API_KEY,
         )
+
+    # ── Tool execution ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_auth_failure(message: str) -> bool:
+        lowered = message.lower()
+        return (
+            "401" in lowered
+            or "bad credentials" in lowered
+            or "unauthorized" in lowered
+        )
+
+    async def _invalidate_github_access(self) -> None:
+        """
+        The user's GitHub token was rejected (revoked/expired) — drop the MCP
+        client and the stored token so the next attempt prompts a reconnect.
+        """
+        if not self.user_id:
+            return
+        logger.warning(
+            f"[ChatService] GitHub auth failure for user {self.user_id} — "
+            f"invalidating stored token"
+        )
+        from app.services.mcp_client import mcp_manager
+        from app.db.token_store import delete_token
+
+        mcp_manager.disconnect_user(self.user_id)
+        try:
+            await delete_token(self.user_id)
+        except Exception as exc:
+            logger.error(f"[ChatService] Failed to delete revoked token: {exc}")
+
+    async def _execute_tool(self, tool_name: str, tool_args: dict) -> str:
+        """
+        Execute a tool by name using this request's tool map.
+        Utilizes LangChain's native .ainvoke() which safely handles both
+        synchronous and asynchronous tools without blocking the event loop.
+        """
+        logger.info(f"[ChatService] Executing tool '{tool_name}' with args: {tool_args}")
+
+        try:
+            tool = self.tool_map.get(tool_name)
+            if not tool:
+                logger.warning(f"[ChatService] Unknown tool requested: {tool_name}")
+                return f"Unknown tool: {tool_name}"
+
+            result = await tool.ainvoke(tool_args)
+            return str(result)
+
+        except Exception as exc:
+            message = str(exc)
+            logger.error(
+                f"[ChatService] Tool execution failed for '{tool_name}': {exc}",
+                exc_info=True,
+            )
+            if self._is_auth_failure(message):
+                await self._invalidate_github_access()
+                return (
+                    "Tool execution error: your GitHub access was rejected "
+                    "(token expired or revoked). Please reconnect your GitHub account."
+                )
+            return f"Tool execution error: {exc}"
+
+    async def _execute_tool_batch(self, tool_calls: list[dict]) -> List[ToolMessage]:
+        """
+        Execute multiple tool calls concurrently using asyncio.gather().
+        Returns a list of ToolMessages in the same order as the input tool_calls.
+        """
+        async def _run_one(tc: dict) -> ToolMessage:
+            tc_id = tc.get("id", "")
+            tc_name = tc.get("name", "")
+            tc_args = tc.get("args", {})
+
+            if isinstance(tc_args, str):
+                try:
+                    tc_args = json.loads(tc_args)
+                except json.JSONDecodeError:
+                    tc_args = {}
+
+            tool_output = await self._execute_tool(tc_name, tc_args)
+            logger.info(
+                f"[ChatService] Tool '{tc_name}' output (first 200 chars): {tool_output[:200]}"
+            )
+            return ToolMessage(content=tool_output, tool_call_id=tc_id)
+
+        return await asyncio.gather(*[_run_one(tc) for tc in tool_calls])
 
     async def chat(self) -> AsyncIterator[str]:
         """
@@ -230,29 +271,37 @@ class ChatService:
 
         selected_tools = route_decision.tools
 
-        # GitHub intent: only bind MCP tools (skip local tools to reduce token cost)
+        # GitHub intent: resolve THIS user's MCP connection (per-user OAuth token)
+        github_client: MCPClient | None = None
         if route_decision.intent == Intent.GITHUB:
-            mcp_only = get_mcp_tool_registry()
-            selected_tools = [t for t in selected_tools if t.name in mcp_only]
-            if not selected_tools:
-                selected_tools = list(mcp_only.values())
-            # Guard: no MCP tools — try one lazy reconnect before giving up
-            if not selected_tools:
-                logger.warning("[ChatService] GitHub intent but no MCP tools loaded — attempting lazy reconnect")
-                if await mcp_client.ensure_connected():
-                    mcp_only = get_mcp_tool_registry()
-                    selected_tools = list(mcp_only.values())
-            if not selected_tools:
-                logger.warning("[ChatService] GitHub intent but MCP reconnect failed — GitHub unavailable")
+            if not self.user_id:
+                logger.warning("[ChatService] GitHub intent but request has no user identity")
+                yield "Please sign in first, then connect your GitHub account to use GitHub features."
+                return
+
+            github_client = await get_connected_client_for_user(self.user_id)
+            if not github_client:
+                logger.info(
+                    f"[ChatService] GitHub intent but user {self.user_id} "
+                    f"has no connected GitHub account"
+                )
                 yield (
-                    "Sorry, I can't access GitHub right now. "
-                    "The GitHub MCP server connection failed. "
-                    "Please check that the GITHUB_API_KEY is valid and the server is reachable."
+                    "I can't access GitHub yet because no account is connected. "
+                    "Please connect your GitHub account first (Settings → Connect GitHub), "
+                    "then ask me again."
                 )
                 return
+
+            selected_tools = list(github_client.mcp_tools)
             logger.info(
-                f"[ChatService] GitHub intent — {len(selected_tools)} MCP tools bound"
+                f"[ChatService] GitHub intent — {len(selected_tools)} MCP tools bound "
+                f"for user {self.user_id}"
             )
+
+        # Per-request tool map: local tools + this user's MCP tools (if any)
+        self.tool_map = dict(get_tool_registry())
+        if github_client is not None:
+            self.tool_map.update({t.name: t for t in github_client.mcp_tools})
 
         messages = [
             SystemMessage(content=_SYSTEM_PROMPT),
@@ -358,7 +407,7 @@ class ChatService:
                 logger.info(f"[ChatService] Round {tool_rounds_used}: tool calls requested: {tool_names}")
                 messages.append(response)
 
-                tool_messages = await _execute_tool_batch(tool_calls)
+                tool_messages = await self._execute_tool_batch(tool_calls)
                 messages.extend(tool_messages)
 
                 for tm in tool_messages:

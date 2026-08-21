@@ -1,32 +1,43 @@
 """
 mcp_client.py
 -------------
-Manages the lifecycle of remote MCP servers via langchain-mcp-adapters.
+Per-user lifecycle management of remote MCP server connections via
+langchain-mcp-adapters.
 
-On startup, connects to configured MCP servers (GitHub) and fetches
-their tool schemas. Filters to essential toolsets to reduce token usage.
+Each user who connects their GitHub account gets an ISOLATED MCPClient —
+their own OAuth access token in the Authorization header, so every tool
+call executes as that user. Clients are cached by Clerk user id with
+idle-TTL / capacity eviction.
+
+Resilience (unchanged from the original design):
+    - Startup connect: 3 attempts with exponential backoff (2s, 4s, 8s)
+    - Lazy reconnect: throttled by a cooldown window, safe under concurrency
 """
 
 import asyncio
 import logging
 import time
-from typing import List
+from typing import Dict, List, Optional
 
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from app.core.config import settings
-
 logger = logging.getLogger("uvicorn")
 
 # Startup retry policy — transient network/DNS blips shouldn't kill GitHub
-# tools for the whole process lifetime.
+# tools for the whole request.
 _CONNECT_ATTEMPTS = 3
 _CONNECT_BASE_DELAY = 2.0  # seconds — doubles each attempt (2s, 4s, 8s)
 
 # Lazy reconnect throttle — at most one reconnect attempt per cooldown window,
 # so a dead endpoint doesn't get hammered on every chat request.
 _RECONNECT_COOLDOWN = 30.0  # seconds
+
+# Client cache eviction
+_MAX_CACHED_USERS = 50
+_IDLE_TTL_SECONDS = 1800.0  # 30 minutes without use → evicted
+
+_GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/"
 
 # Essential GitHub tool names — keeps token cost ~12k instead of ~28k.
 # Covers repos, issues, PRs, code search, branches, commits, and user info.
@@ -54,16 +65,24 @@ _ESSENTIAL_TOOLS = {
 
 
 class MCPClient:
-    def __init__(self):
+    """Connection to the GitHub MCP server on behalf of ONE user."""
+
+    def __init__(self, owner_id: str, access_token: str):
+        self.owner_id = owner_id
+        self.access_token = access_token
         self.client: MultiServerMCPClient | None = None
         self.mcp_tools: List[BaseTool] = []
         self._connected = False
         self._last_attempt = 0.0  # monotonic timestamp of last connect attempt
+        self.last_used = time.monotonic()
         self._connect_lock = asyncio.Lock()  # serialize concurrent reconnects
 
     @property
     def is_connected(self) -> bool:
         return self._connected and len(self.mcp_tools) > 0
+
+    def mark_used(self) -> None:
+        self.last_used = time.monotonic()
 
     async def connect(self):
         """Connect to MCP servers with retries + exponential backoff."""
@@ -73,7 +92,8 @@ class MCPClient:
                 return
             except Exception as exc:
                 logger.error(
-                    f"[MCP] Connection attempt {attempt}/{_CONNECT_ATTEMPTS} failed: {exc}"
+                    f"[MCP] Connection attempt {attempt}/{_CONNECT_ATTEMPTS} "
+                    f"failed for user {self.owner_id}: {exc}"
                 )
                 if attempt < _CONNECT_ATTEMPTS:
                     delay = _CONNECT_BASE_DELAY * (2 ** (attempt - 1))
@@ -81,11 +101,10 @@ class MCPClient:
                     await asyncio.sleep(delay)
 
         logger.error(
-            "[MCP] All connection attempts failed — GitHub tools UNAVAILABLE. "
-            "Lazy reconnect will be attempted on the next GitHub query. "
-            "Check: 1) GITHUB_API_KEY is a valid PAT, "
-            "2) api.githubcopilot.com is reachable, "
-            "3) langchain-mcp-adapters is installed correctly."
+            "[MCP] All connection attempts failed — GitHub tools UNAVAILABLE for "
+            f"user {self.owner_id}. Lazy reconnect will be attempted on the next "
+            "GitHub query. Check that the user's OAuth token is valid and "
+            f"{_GITHUB_MCP_URL} is reachable."
         )
 
     async def ensure_connected(self) -> bool:
@@ -94,11 +113,13 @@ class MCPClient:
         available. Throttled by _RECONNECT_COOLDOWN and safe under concurrency.
         """
         if self.is_connected:
+            self.mark_used()
             return True
 
         async with self._connect_lock:
             # Re-check after acquiring the lock — another task may have reconnected
             if self.is_connected:
+                self.mark_used()
                 return True
 
             now = time.monotonic()
@@ -110,27 +131,17 @@ class MCPClient:
             await self.connect()
             if self.is_connected:
                 logger.info("[MCP] Lazy reconnect succeeded")
+            self.mark_used()
             return self.is_connected
 
     async def _connect_once(self):
         """Single connection attempt — raises on failure."""
-        if not settings.GITHUB_PAT:
-            logger.warning("[MCP] GITHUB_PAT not set — skipping MCP server connection. GitHub tools will be unavailable.")
-            return
-
-        # Validate token format (should start with ghp_ or github_pat_)
-        if not (settings.GITHUB_PAT.startswith("ghp_") or settings.GITHUB_PAT.startswith("github_pat_")):
-            logger.warning(
-                f"[MCP] GITHUB_PAT has unexpected format: '{settings.GITHUB_PAT[:10]}...' "
-                f"(expected 'ghp_' or 'github_pat_' prefix). Connection may fail."
-            )
-
         config = {
             "github": {
                 "transport": "streamable_http",
-                "url": "https://api.githubcopilot.com/mcp/",
+                "url": _GITHUB_MCP_URL,
                 "headers": {
-                    "Authorization": f"Bearer {settings.GITHUB_PAT}",
+                    "Authorization": f"Bearer {self.access_token}",
                 },
             },
         }
@@ -147,32 +158,109 @@ class MCPClient:
             # should be recoverable immediately, not blocked by cooldown.
             self._last_attempt = 0.0
             logger.info(
-                f"[MCP] Connected to GitHub MCP — {len(self.mcp_tools)} essential tools loaded "
-                f"({dropped} filtered out)"
+                f"[MCP] Connected to GitHub MCP for user {self.owner_id} — "
+                f"{len(self.mcp_tools)} essential tools loaded ({dropped} filtered out)"
             )
-            logger.info(f"[MCP] Tools: {[t.name for t in self.mcp_tools]}")
-            # Invalidate cached tool registries so they rebuild with MCP tools
-            from app.tools import invalidate_tool_cache
-            invalidate_tool_cache()
         except Exception as exc:
             self.client = None
             self.mcp_tools = []
             self._connected = False
             # Failure starts the cooldown window for lazy reconnects
             self._last_attempt = time.monotonic()
-            from app.tools import invalidate_tool_cache
-            invalidate_tool_cache()
             raise
 
     async def disconnect(self):
-        if self.client:
-            logger.info("[MCP] Disconnected from MCP servers")
-            self.client = None
-            self.mcp_tools = []
-            self._connected = False
-
-    def get_tools(self) -> List[BaseTool]:
-        return self.mcp_tools
+        self.client = None
+        self.mcp_tools = []
+        self._connected = False
 
 
-mcp_client = MCPClient()
+class MCPClientManager:
+    """
+    Cache of per-user MCP clients: clerk_user_id → MCPClient.
+
+    All public methods are safe under concurrency. Eviction happens on new
+    connections: idle entries past TTL are dropped first, then the
+    least-recently-used when over capacity.
+    """
+
+    def __init__(self):
+        self._clients: Dict[str, MCPClient] = {}
+        self._lock = asyncio.Lock()
+
+    async def get_or_connect(self, user_id: str, access_token: str) -> MCPClient:
+        """
+        Return a connected client for the user — reusing the cached one when
+        possible, creating a fresh connection otherwise (e.g. first use after
+        OAuth connect, or after eviction).
+        """
+        async with self._lock:
+            existing = self._clients.get(user_id)
+            if existing is not None and existing.access_token == access_token:
+                self._evict_locked()
+                connected = await existing.ensure_connected()
+                return existing if connected else None
+            # New user or re-auth with a different token — replace the entry
+            self._clients[user_id] = MCPClient(user_id, access_token)
+            self._evict_locked()
+
+        client = self._clients[user_id]
+        await client.connect()
+        return client if client.is_connected else None
+
+    async def get_cached(self, user_id: str) -> Optional[MCPClient]:
+        """Return the cached client if present and connected; never connects."""
+        async with self._lock:
+            client = self._clients.get(user_id)
+            if client is None:
+                return None
+            self._evict_locked()
+        if await client.ensure_connected():
+            return client
+        return None
+
+    def disconnect_user(self, user_id: str) -> None:
+        """Drop the user's cached client (e.g. after disconnect/revocation)."""
+        client = self._clients.pop(user_id, None)
+        if client:
+            logger.info(f"[MCP] Disconnected MCP client for user {user_id}")
+
+    def stats(self) -> dict:
+        connected = sum(1 for c in self._clients.values() if c.is_connected)
+        return {"cached_users": len(self._clients), "connected_users": connected}
+
+    def _evict_locked(self) -> None:
+        """Must be called while holding self._lock."""
+        now = time.monotonic()
+        expired = [
+            uid
+            for uid, c in self._clients.items()
+            if now - c.last_used > _IDLE_TTL_SECONDS
+        ]
+        for uid in expired:
+            del self._clients[uid]
+            logger.info(f"[MCP] Evicted idle MCP client for user {uid}")
+
+        while len(self._clients) >= _MAX_CACHED_USERS:
+            oldest = min(self._clients, key=lambda u: self._clients[u].last_used)
+            del self._clients[oldest]
+            logger.info(f"[MCP] Evicted LRU MCP client for user {oldest}")
+
+
+async def get_connected_client_for_user(user_id: str) -> Optional[MCPClient]:
+    """
+    Resolve the user's stored OAuth token and return a connected MCP client,
+    or None if the user hasn't connected GitHub (or the connection fails).
+    Convenience bridge used by ChatService.
+    """
+    if not user_id:
+        return None
+    from app.db.token_store import get_decrypted_token
+
+    token = await get_decrypted_token(user_id)
+    if not token:
+        return None
+    return await mcp_manager.get_or_connect(user_id, token)
+
+
+mcp_manager = MCPClientManager()
