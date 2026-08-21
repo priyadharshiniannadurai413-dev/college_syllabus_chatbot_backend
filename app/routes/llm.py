@@ -38,4 +38,4 @@ async def chatbot(request: ChatRequest, current_user: dict = Depends(get_current
     return StreamingResponse(
         service.chat(),
         media_type="text/plain"
-    )
+    )
