@@ -14,5 +14,8 @@ langchain-core
 langchain-mongodb
 langchain-community
 langchain-tavily
-langchain-groq
+langchain-mistralai
 langchain-google-genai
+langchain-mcp-adapters
+
+python-jose[cryptography]
