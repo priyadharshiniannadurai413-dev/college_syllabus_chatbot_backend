@@ -9,6 +9,7 @@ from app.routes import github_auth
 from app.core.config import settings
 # from app.api.voice import router as voice_router
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
+from app.services.mcp_client import mcp_client
 import os
 
 # Ensure outputs directory exists for StaticFiles mounting
@@ -19,7 +20,9 @@ os.makedirs("outputs", exist_ok=True)
 async def lifespan(app: FastAPI):
     # Note: MCP connections are per-user now — no global GitHub connect here.
     await connect_to_mongo()
+    await mcp_client.connect()
     yield
+    await mcp_client.disconnect()
     await close_mongo_connection()
 
 

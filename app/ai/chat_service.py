@@ -44,6 +44,9 @@ from app.services.mcp_client import get_connected_client_for_user, MCPClient
 
 logger = logging.getLogger("uvicorn")
 
+# Cached tool map for _execute_tool — avoids rebuilding dict per call
+_cached_tool_map: dict[str, BaseTool] | None = None
+
 # ──────────────────────────────────────────────────────────────────────────────
 # System prompt — instructs the LLM when to call each tool
 # NOTE: Do NOT describe the JSON tool-calling format here. Native tool calling
