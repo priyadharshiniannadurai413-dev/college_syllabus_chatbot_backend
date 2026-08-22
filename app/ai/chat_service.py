@@ -91,17 +91,18 @@ If the question is a simple greeting or needs no tool, answer directly. Be conci
 # ──────────────────────────────────────────────────────────────────────────────
 class ChatService:
     """
-    Orchestrates the tool-calling agent pipeline using native LangChain LLM wrappers,
-    native .with_fallbacks(), and hybrid router-based tool subset selection.
+    Orchestrates the tool-calling agent pipeline with an explicit, logged
+    primary→fallback LLM chain and hybrid router-based tool subset selection.
 
     Flow:
         1. Regex router classifies intent → high-confidence route or low-confidence flag
         2. If low-confidence and router_llm available → LLM router refines decision
         3. Build [SystemMessage, HumanMessage]
         4. primary_llm.bind_tools(tool_subset)
-        5. invoke()
+        5. invoke() via _invoke_round — mistral → gemini fallback, all failures logged,
+           one rate-limit retry cycle
         6. If tool_calls present: execute tools concurrently → ToolMessages
-        7. stream final response natively.
+        7. Final answer is already complete → pseudo-streamed without another LLM call.
     """
 
     def __init__(
@@ -206,6 +207,110 @@ class ChatService:
                 )
             return f"Tool execution error: {exc}"
 
+    # ── Resilient LLM invocation ──────────────────────────────────────────
+
+    @staticmethod
+    def _content_to_text(content) -> str:
+        """
+        Normalize AIMessage.content to plain text.
+        Gemini returns a LIST of parts ([{'type': 'text', 'text': ...}, ...])
+        while Mistral returns a string — calling .strip() on the list form
+        raised AttributeError and surfaced as 'technical difficulties'.
+        """
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            texts = []
+            for part in content:
+                if isinstance(part, dict):
+                    texts.append(str(part.get("text") or part.get("content") or ""))
+                else:
+                    texts.append(str(getattr(part, "text", "") or ""))
+            return "".join(texts).strip()
+        return str(content or "").strip()
+
+    @staticmethod
+    def _is_rate_limit_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "429" in message or "rate limit" in message
+
+    async def _invoke_round(
+        self, models: List[tuple[str, object]], messages: list
+    ) -> AIMessage:
+        """
+        Invoke the first LLM that succeeds, trying each model in order.
+        Every failure is LOGGED (LangChain's with_fallbacks silently swallows
+        fallback errors, which made provider outages impossible to debug).
+        On rate-limit failures from all providers, waits briefly and retries
+        the full chain once before giving up.
+        """
+
+        async def _try_all() -> AIMessage:
+            last_exc: Exception | None = None
+            for name, model in models:
+                try:
+                    return await model.ainvoke(messages)
+                except Exception as exc:
+                    last_exc = exc
+                    logger.error(
+                        f"[ChatService] LLM '{name}' invoke failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+            raise last_exc  # type: ignore[misc]
+
+        try:
+            return await _try_all()
+        except Exception as exc:
+            if not self._is_rate_limit_error(exc):
+                raise
+            logger.warning(
+                "[ChatService] Rate limited by all providers — retrying once in 15s"
+            )
+            await asyncio.sleep(15)
+            return await _try_all()
+
+    async def _stream_text(
+        self, models: List[tuple[str, object]], messages: list
+    ) -> AsyncIterator[str]:
+        """
+        Stream text tokens from the first LLM that produces output. If a model
+        fails BEFORE yielding anything, transparently fall through to the next.
+        Failures after partial output are logged (restarting would duplicate text).
+        """
+        parser = StrOutputParser()
+        for name, model in models:
+            yielded = False
+            try:
+                async for chunk in (model | parser).astream(messages):
+                    if chunk:
+                        yielded = True
+                        yield chunk
+                return
+            except Exception as exc:
+                logger.error(
+                    f"[ChatService] LLM '{name}' stream failed after "
+                    f"{'some' if yielded else 'zero'} chunks: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                if yielded:
+                    yield "\n\n(The response was cut off — please re-ask to regenerate it.)"
+                    return
+        yield (
+            "I'm currently experiencing technical difficulties. Please try again later."
+        )
+
+    @staticmethod
+    async def _pseudo_stream(text: str) -> AsyncIterator[str]:
+        """
+        Yield an already-complete answer in small chunks so the frontend's
+        streaming renderer behaves normally — WITHOUT a second LLM call
+        (the old code re-invoked the LLM just to re-stream content it already
+        had, doubling token usage and rate-limit pressure on every answer).
+        """
+        step = 64
+        for i in range(0, len(text), step):
+            yield text[i : i + step]
+
     async def _execute_tool_batch(self, tool_calls: list[dict]) -> List[ToolMessage]:
         """
         Execute multiple tool calls concurrently using asyncio.gather().
@@ -308,9 +413,7 @@ class ChatService:
             HumanMessage(content=self.user_prompt),
         ]
 
-        parser = StrOutputParser()
-
-        # Build tool-bound models — tool_choice="auto" makes the model decide
+        # Tool-bound models — tool_choice="auto" makes the model decide
         # whether to call a tool or answer directly, using NATIVE function
         # calling (not text-based imitation).
         # If no tools selected, bind empty list so LLM answers directly.
@@ -322,8 +425,16 @@ class ChatService:
             selected_tools, tool_choice="auto"
         )
 
-        # Create combined fallback chain for the first round (tool inspection)
-        llm_with_tools_chain = primary_with_tools.with_fallbacks([fallback_with_tools])
+        # Ordered provider chain — primary first, fallback second. Used by
+        # _invoke_round / _stream_text which log every failure explicitly.
+        round_models = [
+            ("mistral", primary_with_tools),
+            ("gemini", fallback_with_tools),
+        ]
+        plain_models = [
+            ("mistral", self.primary_llm),
+            ("gemini", self.fallback_llm),
+        ]
 
         try:
             logger.info("[ChatService] Round 1: Invoking LLM with tool definitions.")
@@ -337,10 +448,10 @@ class ChatService:
             tool_rounds_used = 0
 
             for _ in range(MAX_TOOL_ROUNDS):
-                response: AIMessage = await llm_with_tools_chain.ainvoke(messages)
+                response: AIMessage = await self._invoke_round(round_models, messages)
 
                 tool_calls = getattr(response, "tool_calls", None)
-                raw_content = (response.content or "").strip()
+                raw_content = self._content_to_text(response.content)
 
                 logger.info(
                     f"[ChatService] Round {tool_rounds_used + 1} response — "
@@ -361,44 +472,43 @@ class ChatService:
                         "[ChatService] Model emitted a fake text tool-call instead of "
                         "using native tool_calls. Retrying without tools on fallback LLM."
                     )
-                    plain_chain = self.fallback_llm | parser
-                    async for chunk in plain_chain.astream(messages):
-                        if chunk:
-                            yield chunk
+                    async for chunk in self._stream_text(plain_models, messages):
+                        yield chunk
                     return
 
-                # ── Final text answer — stream it token-by-token ─────────────
+                # ── Final text answer ────────────────────────────────────────
                 if not tool_calls:
                     logger.info("[ChatService] Final answer (no tool call)")
                     if tool_rounds_used == 0:
                         if raw_content:
                             yield raw_content
                         else:
-                            stream_chain = (
-                                self.primary_llm.with_fallbacks([self.fallback_llm]) | parser
-                            )
-                            async for chunk in stream_chain.astream(messages):
-                                if chunk:
-                                    yield chunk
+                            # Empty first response — retry once via plain streaming
+                            async for chunk in self._stream_text(plain_models, messages):
+                                yield chunk
                         return
 
-                    # After tool use: re-stream with the bound chain so the
-                    # final answer is delivered token-by-token.
-                    stream_chain = llm_with_tools_chain | parser
-                    chunk_count = 0
-                    async for chunk in stream_chain.astream(messages):
-                        if chunk:
+                    # After tool use the answer is ALREADY complete in
+                    # raw_content — pseudo-stream it instead of re-invoking the
+                    # LLM (the old re-stream doubled token usage and was the
+                    # main trigger for provider rate limits).
+                    if raw_content:
+                        async for chunk in self._pseudo_stream(raw_content):
                             yield chunk
-                            chunk_count += 1
-                    if chunk_count == 0:
+                    else:
                         logger.warning(
-                            "[ChatService] Final streaming produced ZERO chunks — "
-                            "falling back to direct content"
+                            "[ChatService] Post-tool response had empty content — "
+                            "retrying via plain streaming"
                         )
-                        yield raw_content if raw_content else (
-                            "I received the data but couldn't generate a response. "
-                            "Please try rephrasing your question."
-                        )
+                        yielded_any = False
+                        async for chunk in self._stream_text(round_models, messages):
+                            yielded_any = True
+                            yield chunk
+                        if not yielded_any:
+                            yield (
+                                "I received the data but couldn't generate a response. "
+                                "Please try rephrasing your question."
+                            )
                     return
 
                 # ── Tool call(s) detected — execute and continue the loop ────
@@ -429,8 +539,8 @@ class ChatService:
 
             # ── Max rounds reached — force a final answer from the model ─────
             logger.warning("[ChatService] Reached max tool rounds — forcing final answer")
-            final_response: AIMessage = await llm_with_tools_chain.ainvoke(messages)
-            final_content = (final_response.content or "").strip()
+            final_response: AIMessage = await self._invoke_round(round_models, messages)
+            final_content = self._content_to_text(final_response.content)
             if final_content:
                 yield final_content
             else:
@@ -438,4 +548,10 @@ class ChatService:
 
         except Exception as exc:
             logger.error(f"[ChatService] Chat failed entirely: {exc}", exc_info=True)
-            yield "I'm currently experiencing technical difficulties. Please try again later."
+            if self._is_rate_limit_error(exc):
+                yield (
+                    "I'm temporarily rate-limited by my AI provider. "
+                    "Please wait about a minute and try again."
+                )
+            else:
+                yield "I'm currently experiencing technical difficulties. Please try again later."

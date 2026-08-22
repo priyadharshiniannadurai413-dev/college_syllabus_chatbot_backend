@@ -29,6 +29,13 @@ from app.core.config import settings
 
 logger = logging.getLogger("uvicorn")
 
+# NOTE on account selection: GitHub's OAuth web application flow supports ONLY
+# client_id, redirect_uri, scope, state and allow_signup on /login/oauth/authorize.
+# There is NO supported "account chooser" parameter (nothing like OIDC's
+# prompt=select_account), so the consent screen always binds to whichever
+# account is signed into github.com in that browser. Disconnecting here cannot
+# end that session. The supported way to make reconnect a FRESH authorization
+# is to delete the stored grant server-side — see revoke_user_authorization().
 _GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 _GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 _GITHUB_USER_API = "https://api.github.com/user"
@@ -181,6 +188,41 @@ def fetch_github_login(access_token: str) -> str:
         )
 
 
+def is_token_active(access_token: str) -> bool | None:
+    """
+    Check whether an access token is still accepted by GitHub.
+
+    Returns:
+        True  — token valid
+        False — GitHub explicitly rejected it (revoked/expired)
+        None  — could not verify (network error / rate limit / GitHub outage);
+                callers should assume still valid rather than wipe stored data.
+    """
+    try:
+        resp = requests.get(
+            _GITHUB_USER_API,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=5,
+        )
+    except requests.RequestException as exc:
+        logger.warning(f"[GitHubOAuth] Token validation request failed: {exc}")
+        return None
+
+    if resp.status_code == 200:
+        return True
+    if resp.status_code == 401:
+        logger.info("[GitHubOAuth] Token rejected by GitHub (401) — considered dead")
+        return False
+    # 403 rate-limit, 5xx, etc. — inconclusive, don't treat as dead
+    logger.warning(
+        f"[GitHubOAuth] Token validation inconclusive (HTTP {resp.status_code})"
+    )
+    return None
+
+
 def revoke_user_authorization(access_token: str) -> bool:
     """
     Revoke the user's OAuth grant on GitHub's side so reconnecting always
@@ -208,6 +250,7 @@ def revoke_user_authorization(access_token: str) -> bool:
             timeout=15,
         )
         if resp.status_code == 204:
+            logger.info("[GitHubOAuth] Authorization grant deleted — reconnect will require full re-consent")
             return True
         logger.warning(
             f"[GitHubOAuth] Grant deletion returned {resp.status_code}; "
@@ -225,6 +268,7 @@ def revoke_user_authorization(access_token: str) -> bool:
             timeout=15,
         )
         if resp.status_code == 204:
+            logger.info("[GitHubOAuth] Access token revoked via Applications API")
             return True
         logger.warning(f"[GitHubOAuth] Token revocation returned {resp.status_code}")
     except requests.RequestException as exc:
