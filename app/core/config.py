@@ -14,7 +14,15 @@ class Settings:
     # Per-user GitHub OAuth App (users connect their own accounts)
     GITHUB_OAUTH_CLIENT_ID = os.getenv("GITHUB_OAUTH_CLIENT_ID")
     GITHUB_OAUTH_CLIENT_SECRET = os.getenv("GITHUB_OAUTH_CLIENT_SECRET")
-    GITHUB_OAUTH_REDIRECT_URI = os.getenv("GITHUB_OAUTH_REDIRECT_URI")
+    # Explicit env var wins; otherwise derive from the frontend URL so each
+    # environment (localhost / Render / Vercel) gets a matching OAuth callback
+    # without extra configuration. Must match the callback registered on the
+    # GitHub OAuth App.
+    _frontend = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+    GITHUB_OAUTH_REDIRECT_URI = (
+        os.getenv("GITHUB_OAUTH_REDIRECT_URI")
+        or (f"{_frontend}/github/callback" if _frontend else None)
+    )
     TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY")
 
     CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL")

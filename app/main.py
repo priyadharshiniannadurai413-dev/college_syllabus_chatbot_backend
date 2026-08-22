@@ -65,13 +65,19 @@ async def validation_exception_handler(
 
 
 # Allowed frontend origins
+# NOTE: localhost and 127.0.0.1 are DIFFERENT origins for CORS — allow both so
+# the app works regardless of which URL the dev server prints.
 _allowed_origins = [
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
 ]
 
 
 # Add deployed frontend URL from environment variable
-_frontend_url = os.getenv("FRONTEND_URL", "")
+# NOTE: rstrip("/") — CORSMiddleware does EXACT origin matching, and browsers
+# send the Origin header WITHOUT a trailing slash, so "https://x.vercel.app/"
+# would silently never match.
+_frontend_url = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
 
 if _frontend_url:
     _allowed_origins.append(_frontend_url)
