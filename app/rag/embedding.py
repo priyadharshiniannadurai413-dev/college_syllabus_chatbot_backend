@@ -1,70 +1,42 @@
-import asyncio
-import litellm
-import logging
-
-logger = logging.getLogger("uvicorn")
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from app.core.config import settings
 
 
 class EmbeddingModel:
-    """
-    Turns text into vectors (lists of numbers) so we can compare how
-    similar two pieces of text are by comparing their vectors.
+    def __init__(
+        self,
+        model_name: str = "models/gemini-embedding-001",
+        dimension: int = 384,
+    ):
+        self.embeddings = GoogleGenerativeAIEmbeddings(
+            model=model_name,
+            google_api_key=settings.GEMINI_API_KEY,
+            output_dimensionality=dimension,
+        )
 
-    Uses Google's Gemini embedding API (hosted, no local model to download).
-    """
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Convert document chunks into embeddings."""
+        if not texts:
+            return []
+        return await self.embeddings.aembed_documents(texts)
 
-    def __init__(self, model_name: str = "gemini/gemini-embedding-001", dimensions: int = 384):
-        self.model_name = model_name
-        self.dimensions = dimensions
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Convert document chunks into embeddings (sync)."""
+        if not texts:
+            return []
+        return self.embeddings.embed_documents(texts)
 
-    async def embed_texts(self, texts: list[str], batch_size: int = 10) -> list[list[float]]:
-        """Embeds many chunks at once — used during ingestion."""
-        embeddings = []
+    def embed_query(self, text: str) -> list[float]:
+        """Convert the user's query into an embedding (sync)."""
+        return self.embeddings.embed_query(text)
 
-        for start in range(0, len(texts), batch_size):
-            batch = texts[start:start + batch_size]
-            
-            # Retry mechanism with exponential backoff
-            max_retries = 6
-            delay = 2.0
-            for attempt in range(max_retries):
-                try:
-                    response = await litellm.aembedding(
-                        model=self.model_name,
-                        input=batch,
-                        dimensions=self.dimensions,
-                        task_type="RETRIEVAL_DOCUMENT",
-                    )
-                    embeddings.extend(item["embedding"] for item in response.data)
-                    break
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        raise e
-                    logger.warning(f"⚠️ Embedding request failed (attempt {attempt + 1}/{max_retries}). Retrying in {delay}s... Error: {e}")
-                    await asyncio.sleep(delay)
-                    delay *= 2.0
 
-            # Small delay between batches to respect free tier RPM limits
-            await asyncio.sleep(1.0)
+_embedding_instance: EmbeddingModel | None = None
 
-        return embeddings
 
-    async def embed_query(self, text: str) -> list[float]:
-        """Embeds a single piece of text — used for a user's question."""
-        max_retries = 6
-        delay = 2.0
-        for attempt in range(max_retries):
-            try:
-                response = await litellm.aembedding(
-                    model=self.model_name,
-                    input=[text],
-                    dimensions=self.dimensions,
-                    task_type="RETRIEVAL_QUERY",
-                )
-                return response.data[0]["embedding"]
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    raise e
-                logger.warning(f"⚠️ Query embedding request failed. Retrying in {delay}s... Error: {e}")
-                await asyncio.sleep(delay)
-                delay *= 2.0
+def get_embedding_model() -> EmbeddingModel:
+    """Return a shared EmbeddingModel singleton."""
+    global _embedding_instance
+    if _embedding_instance is None:
+        _embedding_instance = EmbeddingModel()
+    return _embedding_instance

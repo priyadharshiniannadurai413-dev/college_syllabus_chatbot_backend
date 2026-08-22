@@ -4,10 +4,29 @@ import os
 load_dotenv()
 class Settings:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
     MONGODB_URL = os.getenv("MONGODB_URL")
-    MONGO_URL = os.getenv("MONGODB_URL") or os.getenv("MONGO_URL")
     DB_NAME = os.getenv("DB_NAME", "Chatbot")
+    TAVILY_API_KEY=os.getenv("TAVILY_API_KEY")
+
+    GITHUB_PAT = os.getenv("GITHUB_API_KEY")  # legacy — no longer used for MCP
+
+    # Per-user GitHub OAuth App (users connect their own accounts)
+    GITHUB_OAUTH_CLIENT_ID = os.getenv("GITHUB_OAUTH_CLIENT_ID")
+    GITHUB_OAUTH_CLIENT_SECRET = os.getenv("GITHUB_OAUTH_CLIENT_SECRET")
+    # Explicit env var wins; otherwise derive from the frontend URL so each
+    # environment (localhost / Render / Vercel) gets a matching OAuth callback
+    # without extra configuration. Must match the callback registered on the
+    # GitHub OAuth App.
+    _frontend = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+    GITHUB_OAUTH_REDIRECT_URI = (
+        os.getenv("GITHUB_OAUTH_REDIRECT_URI")
+        or (f"{_frontend}/github/callback" if _frontend else None)
+    )
+    TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY")
+
+    CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL")
+    CLERK_ISSUER = os.getenv("CLERK_ISSUER")
 
 settings = Settings()
 

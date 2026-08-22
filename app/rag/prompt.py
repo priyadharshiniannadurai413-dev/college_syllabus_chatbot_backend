@@ -1,34 +1,23 @@
-def build_prompt(
-    context: str,
-    question: str,
-    intent: str = "general",
-    semester: str = None,
-    is_voice: bool = False,
-) -> str:
-    voice_instruction = ""
+# ── LangChain import ───────────────────────────────────────────────────────────
+from langchain_core.prompts import ChatPromptTemplate
 
-    if is_voice:
-        voice_instruction = """
-VOICE RESPONSE RULES:
-- Answer in simple language.
-- Keep the answer within 2–3 short sentences.
-- Do not use markdown.
-- Do not use tables.
-- Read naturally as if speaking.
-"""
-    """
-    Build an intent-aware RAG prompt for the syllabus chatbot.
 
-    intent: 'list_courses' | 'credit_info' | 'course_detail' | 'general'
-    semester: Roman numeral string e.g. 'I', 'IV', or None
-    """
+# ──────────────────────────────────────────────────────────────────────────────
+# Intent-specific prompt templates
+#
+# Each template uses the same variables that the original f-strings used:
+#   {context}           — retrieved syllabus chunks
+#   {question}          — the student's original question
+#   {sem_label}         — "Semester IV" or "the requested semester"
+#   {no_info_msg}       — fallback string when context lacks the answer
+#   {voice_instruction} — empty string or the VOICE RESPONSE RULES block
+#
+# All prompt content is kept character-for-character identical to the original.
+# ──────────────────────────────────────────────────────────────────────────────
 
-    sem_label = f"Semester {semester}" if semester else "the requested semester"
-
-    no_info_msg = "I couldn't find this information in the syllabus."
-
-    if intent == "list_courses":
-        return f"""You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
+_LIST_COURSES_TEMPLATE = ChatPromptTemplate.from_messages([
+    ("human", """\
+You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
 
 CONTEXT (retrieved from syllabus):
 {context}
@@ -50,10 +39,12 @@ Using ONLY the context above, list all courses for {sem_label} in this exact for
 
 QUESTION: {question}
 
-ANSWER:"""
+ANSWER:"""),
+])
 
-    elif intent == "credit_info":
-        return f"""You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
+_CREDIT_INFO_TEMPLATE = ChatPromptTemplate.from_messages([
+    ("human", """\
+You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
 
 CONTEXT (retrieved from syllabus):
 {context}
@@ -69,10 +60,12 @@ Using ONLY the context above, provide a clear summary of credits. If a credits s
 
 QUESTION: {question}
 
-ANSWER:"""
+ANSWER:"""),
+])
 
-    elif intent == "unit":
-        return f"""You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
+_UNIT_TEMPLATE = ChatPromptTemplate.from_messages([
+    ("human", """\
+You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
 
 CONTEXT (retrieved from syllabus):
 {context}
@@ -94,10 +87,12 @@ Using ONLY the context above:
 QUESTION:
 {question}
 
-ANSWER:"""
+ANSWER:"""),
+])
 
-    elif intent == "course_detail":
-        return f"""You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
+_COURSE_DETAIL_TEMPLATE = ChatPromptTemplate.from_messages([
+    ("human", """\
+You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
 
 CONTEXT (retrieved from syllabus):
 {context}
@@ -119,11 +114,12 @@ Using ONLY the context above, provide a structured answer with:
 QUESTION:
 {question}
 
-ANSWER:"""
-        
+ANSWER:"""),
+])
 
-    else:  # general
-        return f"""You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
+_GENERAL_TEMPLATE = ChatPromptTemplate.from_messages([
+    ("human", """\
+You are SyllabusBot, an academic assistant for GCE Bargur ECE Department (2022 CBCS Regulations).
 
 CONTEXT (retrieved from syllabus):
 {context}
@@ -140,4 +136,76 @@ Rules:
 
 QUESTION: {question}
 
-ANSWER:"""
+ANSWER:"""),
+])
+
+# Map intent strings to their corresponding ChatPromptTemplate
+_INTENT_TEMPLATE_MAP: dict[str, ChatPromptTemplate] = {
+    "list_courses":  _LIST_COURSES_TEMPLATE,
+    "credit_info":   _CREDIT_INFO_TEMPLATE,
+    "unit":          _UNIT_TEMPLATE,
+    "course_detail": _COURSE_DETAIL_TEMPLATE,
+    "general":       _GENERAL_TEMPLATE,
+}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Public API
+# ──────────────────────────────────────────────────────────────────────────────
+
+def build_prompt(
+    context: str,
+    question: str,
+    intent: str = "general",
+    semester: str = None,
+    is_voice: bool = False,
+):
+    """
+    Build an intent-aware RAG prompt using LangChain's ``ChatPromptTemplate``.
+
+    Parameters
+    ----------
+    context  : Retrieved syllabus chunks joined as a single string.
+    question : The student's original question.
+    intent   : One of ``'list_courses'``, ``'credit_info'``, ``'unit'``,
+               ``'course_detail'``, ``'general'``.
+    semester : Roman numeral string (e.g. ``'I'``, ``'IV'``), or ``None``.
+    is_voice : When ``True``, prepends the VOICE RESPONSE RULES block.
+
+    Returns
+    -------
+    A ``ChatPromptValue`` (LangChain formatted prompt) that can be passed
+    directly to an LLM in a LangChain chain, or converted to a string via
+    ``.to_string()``.
+    """
+
+    # ── Shared template variables ─────────────────────────────────────────────
+
+    sem_label = f"Semester {semester}" if semester else "the requested semester"
+    no_info_msg = "I couldn't find this information in the syllabus."
+
+    # Voice instruction block — empty string when not in voice mode so the
+    # template renders cleanly without a blank section
+    voice_instruction = ""
+    if is_voice:
+        voice_instruction = """\
+VOICE RESPONSE RULES:
+- Answer in simple language.
+- Keep the answer within 2–3 short sentences.
+- Do not use markdown.
+- Do not use tables.
+- Read naturally as if speaking.
+"""
+
+    # ── Select the right template for this intent ─────────────────────────────
+    # Fall back to the general template for any unrecognised intent string
+    template = _INTENT_TEMPLATE_MAP.get(intent, _GENERAL_TEMPLATE)
+
+    # ── Format and return the ChatPromptValue ─────────────────────────────────
+    return template.format_prompt(
+        context=context,
+        question=question,
+        sem_label=sem_label,
+        no_info_msg=no_info_msg,
+        voice_instruction=voice_instruction,
+    )

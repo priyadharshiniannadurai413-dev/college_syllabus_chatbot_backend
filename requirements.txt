@@ -1,12 +1,23 @@
 fastapi
-litellm==1.91.3
+litellm==1.82.6
 python-dotenv
 uvicorn
 
 pypdf
 pdfplumber
 
-
-
 pymongo
 motor
+
+langchain
+langchain-core
+langchain-mongodb
+langchain-community
+langchain-tavily
+langchain-mistralai
+langchain-google-genai
+langchain-mcp-adapters
+
+python-jose[cryptography]
+cryptography
+requests
